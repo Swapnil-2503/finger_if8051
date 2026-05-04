@@ -4,7 +4,7 @@
 #define FOSC 16000000UL
 #define BAUD 9600
 
-
+unsigned char RxBuf[20];
 
 //------------------------------------
 // UART Initialization
@@ -12,40 +12,22 @@
 void UART_Init(void)
 {
     SCON = 0x50;
-    /*
-        SM0 = 0
-        SM1 = 1  -> UART Mode 1 (8-bit UART)
-        REN = 1  -> Enable Receiver
-    */
 
-    TMOD &= 0x0F;   // Clear Timer1 bits
-    TMOD |= 0x20;   // Timer1 Mode2 (8-bit auto reload)
+    TMOD &= 0x0F;
+    TMOD |= 0x20;
 
-    PCON &= 0x7F;   // SMOD = 0 (normal baudrate)
-
-    /*
-        Baudrate calculation:
-
-        TH1 = 256 - (FOSC / (384 * BAUD))
-
-        For 16MHz and 9600 baud:
-
-        TH1 = 256 - (16000000 / (384 * 9600))
-             = 256 - 4.34
-             = 252
-             = 0xFC
-    */
+    PCON &= 0x7F;
 
     TH1 = 0xFC;
     TL1 = 0xFC;
 
-    TR1 = 1;    // Start Timer1
+    TR1 = 1;
 }
 
 //------------------------------------
 // UART Transmit Character
 //------------------------------------
-void UART_TxChar(char ch)
+void UART_TxChar(unsigned char ch)
 {
     SBUF = ch;
 
@@ -55,17 +37,9 @@ void UART_TxChar(char ch)
 }
 
 //------------------------------------
-// UART Transmit String
+// UART Transmit Array
 //------------------------------------
-void UART_TxString(char *str)
-{
-    while(*str)
-    {
-        UART_TxChar(*str++);
-    }
-}
-
-void UART_TxArray(unsigned char *arr, unsigned int len)
+void UART_TxArray(const __code unsigned char *arr, unsigned int len)
 {
     unsigned int i;
 
@@ -74,10 +48,11 @@ void UART_TxArray(unsigned char *arr, unsigned int len)
         UART_TxChar(arr[i]);
     }
 }
+
 //------------------------------------
 // UART Receive Character
 //------------------------------------
-char UART_RxChar(void)
+unsigned char UART_RxChar(void)
 {
     while(RI == 0);
 
@@ -86,6 +61,22 @@ char UART_RxChar(void)
     return SBUF;
 }
 
+//------------------------------------
+// UART Receive Array
+//------------------------------------
+void UART_RxArray(unsigned char *buf, unsigned int len)
+{
+    unsigned int i;
+
+    for(i = 0; i < len; i++)
+    {
+        buf[i] = UART_RxChar();
+    }
+}
+
+//------------------------------------
+// Delay
+//------------------------------------
 void Delay(unsigned int ms)
 {
     unsigned int i,j;
@@ -97,55 +88,82 @@ void Delay(unsigned int ms)
 }
 
 //------------------------------------
-// Enroll Fingerprint Function
+// Send Command And Check ACK
 //------------------------------------
-void EnrollFinger(void)
+__bit SendCommand(const __code unsigned char *cmd,
+                unsigned int cmd_len)
 {
-    unsigned char i;
+    UART_TxArray(cmd, cmd_len);
 
-    UART_TxString("Place Finger First Time\r\n");
+    // ACK packet usually 12 bytes
+    UART_RxArray(RxBuf,12);
+
+    /*
+        ACK Structure:
+
+        RxBuf[9] = Confirmation Code
+
+        0x00 = Success
+    */
+
+    if(RxBuf[9] == 0x00)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+//------------------------------------
+// Wait Until Finger Detected
+//------------------------------------
+void WaitForFinger(void)
+{
+    while(1)
+    {
+        if(SendCommand(GenImg,12))
+        {
+            break;
+        }
+
+        Delay(300);
+    }
+}
+
+//------------------------------------
+// Enroll Fingerprint
+//------------------------------------
+__bit EnrollFinger(void)
+{
+    WaitForFinger();
+
+    Delay(1000);
+
+    if(!SendCommand(Img2Tz1,13))
+        return 0;
 
     Delay(3000);
 
-    // Capture Finger
-    UART_TxArray(GenImg,12);
+    WaitForFinger();
 
     Delay(1000);
 
-    // Convert to Buffer1
-    UART_TxArray(Img2Tz1,13);
+    if(!SendCommand(Img2Tz2,13))
+        return 0;
 
     Delay(1000);
 
-    UART_TxString("Remove Finger\r\n");
-
-    Delay(3000);
-
-    UART_TxString("Place Same Finger Again\r\n");
-
-    Delay(3000);
-
-    // Capture Again
-    UART_TxArray(GenImg,12);
+    if(!SendCommand(RegModel,12))
+        return 0;
 
     Delay(1000);
 
-    // Convert to Buffer2
-    UART_TxArray(Img2Tz2,13);
+    if(!SendCommand(Store,15))
+        return 0;
 
-    Delay(1000);
-
-    // Create Template
-    UART_TxArray(RegModel,12);
-
-    Delay(1000);
-
-    // Store Template
-    UART_TxArray(Store,15);
-
-    Delay(1000);
-
-    UART_TxString("Fingerprint Stored\r\n");
+    return 1;
 }
 
 //------------------------------------
@@ -154,8 +172,6 @@ void EnrollFinger(void)
 void main(void)
 {
     UART_Init();
-
-    UART_TxString("R307 Fingerprint System\r\n");
 
     Delay(2000);
 
